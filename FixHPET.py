@@ -156,11 +156,25 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
             exit(1)
         self.u.head()
         print("")
+        got_origin = False
+        origin_path = ""
         while True:
-            dsdt = self.u.grab("Please drag and drop DSDT.aml here:  ")
+            dsdt = self.u.grab("Please drag and drop your origin folder or DSDT.aml here:  ")
             dsdt = self.u.check_path(dsdt)
-            if not dsdt or not os.path.basename(dsdt).lower().startswith("dsdt") or not dsdt.lower().endswith(".aml"):
-                print(" - I couldn't locate that file, or it's not a DSDT.aml file!")
+            if not dsdt:
+                print(" - I couldn't find that file/folder!")
+                continue
+            if os.path.isdir(dsdt):
+                # Check for DSDT.aml inside
+                if os.path.exists(os.path.join(dsdt,"DSDT.aml")):
+                    origin_path = dsdt
+                    got_origin = True
+                    dsdt = os.path.join(dsdt,"DSDT.aml")
+                else:
+                    print(" - I couldn't locate a DSDT.aml in that folder!")
+                    continue
+            elif os.path.basename(dsdt).lower() != "dsdt.aml":
+                print(" - The dropped file must be DSDT.aml!")
                 continue
             print("")
             break
@@ -168,12 +182,33 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
         try:
             # Should have a DSDT - try and decompile it with the `-l` flag
             print("Copying to temp folder...")
-            shutil.copy(dsdt,temp)
-            dsdt_path = os.path.join(temp,os.path.basename(dsdt))
+            if got_origin:
+                got_origin = False # Reset until we get an SSDT file copied
+                for x in os.listdir(origin_path):
+                    if x.startswith(".") or x.lower().startswith("ssdt-x") or not x.lower().endswith(".aml"):
+                        # Not needed - skip
+                        continue
+                    if x.lower().startswith("ssdt"):
+                        got_origin = True # Got at least one - nice
+                    print(" - {}...".format(x))
+                    shutil.copy(os.path.join(origin_path,x),temp)
+                dsdt_path = os.path.join(temp,"DSDT.aml")
+            else:
+                print(" - {}...".format(os.path.basename(dsdt)))
+                shutil.copy(dsdt,temp)
+                dsdt_path = os.path.join(temp,os.path.basename(dsdt))
             dsdt_l_path = os.path.splitext(dsdt_path)[0]+".dsl"
             
+            print("")
             print("Creating a mixed listing file...")
-            out = self.r.run({"args":[self.iasl,"-l",dsdt_path]})
+            os.chdir(temp)
+            if got_origin:
+                # Have at least one SSDT to use while decompiling
+                out = self.r.run({"args":"{} -da -dl -l DSDT.aml SSDT*".format(self.iasl),"shell":True})
+            else:
+                # Just the DSDT - might be incomplete though
+                out = self.r.run({"args":[self.iasl,"-da","-dl","-l",dsdt_path]})
+            
             if out[2] != 0 or not os.path.exists(dsdt_l_path):
                 raise Exception("Failed to decompile {}".format(os.path.basename(dsdt_path)))
             
@@ -229,7 +264,6 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                     print("   Replace: 22000079")
                     print("")
                     patches.append({"Comment":"IRQ {} Null".format(i),"Find":x,"Replace":"22000079"})
-            print("")
 
             if "PCI0.LPCB" in dsdt_c:
                 self.scope = "LPCB"
@@ -237,6 +271,7 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                 self.scope = "LPC"
             
             if not self.scope:
+                print("")
                 print("Could not locate LPCB or LPC in DSDT!")
                 print("")
                 while True:
