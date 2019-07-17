@@ -12,16 +12,16 @@ NL=$'\n'
 #   TRUE  = Use if found, use py2 otherwise
 #   FALSE = Use py2
 #   FORCE = Use py3
-use_py3="FORCE"
+use_py3="TRUE"
 
 # Check to see if we need to force based on
 # macOS version. 10.15 has a dummy python3 version
 # that can trip up some py3 detection in other scripts.
-current_os="$(sw_vers -productVersion)"
-if [ "$(echo "$current_os < 10.15" |bc)" == "1" ]; then
-    # We're under 10.15, switch to TRUE instead
-    use_py3="TRUE"
-fi
+# current_os="$(sw_vers -productVersion)"
+# if [ "$(echo "$current_os < 10.15" |bc)" == "1" ]; then
+#     # We're under 10.15, switch to TRUE instead
+#     use_py3="TRUE"
+# fi
 
 tempdir=""
 
