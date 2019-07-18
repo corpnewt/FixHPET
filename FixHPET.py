@@ -333,8 +333,11 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                 if not ending:
                     print("Missing IRQ Null Patch ending for {}! Skipping...".format(dev))
                     continue
+                if len(t) % 6:
+                    print("IRQ Null Patch for {} has an incorrect length! Skipping...".format(dev))
+                    continue
                 t_patch = t+ending
-                r_patch = (len(t)/6)*"220000"+ending
+                r_patch = int(len(t)/6)*"220000"+ending
                 name = "{} IRQ {} Null Patch".format(dev, devs[dev])
                 print(" - {}".format(name, dev, devs[dev]))
                 print("      Find: {}".format(t_patch))
