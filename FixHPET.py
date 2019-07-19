@@ -171,7 +171,7 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
         return total
 
     def convert_irq_to_int(self, irq):
-        b = "0"*(16-irq)+"1"+"0"*(irq)
+        b = "0"*(15-irq)+"1"+"0"*(irq)
         return int(b,2)
 
     def get_all_irqs(self, irq):
