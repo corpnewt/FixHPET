@@ -16,8 +16,9 @@ class FixHPET:
         self.output = "Results"
         self._crs = "5F435253"
         self.xcrs = "58435253"
-        self.legacy_irq = ["TMR","TIMR","IPIC","RTC"] # Could add HPET for extra patch-ness
+        self.legacy_irq = ["TMR","TIMR","IPIC","RTC"] # Could add HPET for extra patch-ness, but shouldn't be needed
         self.scope = ""
+        self.target_irqs = [0,8,11]
         self.ssdt_source = """//
 // Supplementary HPET _CRS from Goldfish64
 // Requires the HPET's _CRS to XCRS rename
@@ -120,9 +121,41 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
         hex_str = hex(total)[2:].upper().rjust(4,"0")
         return "".join([hex_str[i:i + 2] for i in range(0, len(hex_str), 2)][::-1])
 
-    def convert_irq_to_int(self, irq):
-        b = "0"*(16-irq)+"1"+"0"*(irq)
-        return int(b,2)
+    def get_hex_from_irqs(self, irq, rem_irq = None):
+        # We need to search for a few different types:
+        #
+        # 22 XX XX 22 XX XX 22 XX XX (multiples on different lines)
+        # 22 XX XX (summed multiples in the same bracket - {0,8,11})
+        # 22 XX XX (single IRQNoFlags entry)
+        # 
+        # Can end with 79 [00] (end of method), 86 09 (middle of method) or 47 01 (unknown)
+        lines = []
+        for i in irq.split("-"):
+            find = self.get_int_for_line(i)
+            repl = [0]*len(find)
+            # Now we need to verify if we're patching *all* IRQs, or just some specifics
+            if rem_irq:
+                repl = [x for x in find]
+                matched = []
+                for x in rem_irq:
+                    # Get the int
+                    rem = self.convert_irq_to_int(x)
+                    repl = [x&(rem^0xFFFF) if x >= rem else x for x in repl]
+            # Get the hex
+            d = {
+                "irq":i,
+                "find": "".join(["22"+self.get_hex_from_int(x) for x in find]),
+                "repl": "".join(["22"+self.get_hex_from_int(x) for x in repl])
+                }
+            d["changed"] = not (d["find"]==d["repl"])
+            lines.append(d)
+        return lines
+        
+    def get_int_for_line(self, irq):
+        irq_list = []
+        for i in irq.split(":"):
+            irq_list.append(self.same_line_irq(i))
+        return irq_list
 
     def same_line_irq(self, irq):
         # We sum the IRQ values and return the int
@@ -137,24 +170,9 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
             total = total | self.convert_irq_to_int(i)
         return total
 
-    def get_hex_from_irqs(self, irq):
-        # We need to search for a few different types:
-        #
-        # 22 XX XX 22 XX XX 22 XX XX (multiples on different lines)
-        # 22 XX XX (summed multiples in the same bracket - {0,8,11})
-        # 22 XX XX (single IRQNoFlags entry)
-        # 
-        # Can end with 79 [00] (end of method), 86 09 (middle of method) or 47 01 (unknown)
-        lines = []
-        for i in irq.split("-"):
-            lines.append(self.get_hex_for_line(i))
-        return lines
-        
-    def get_hex_for_line(self, irq):
-        irq_list = []
-        for i in irq.split(":"):
-            irq_list.append("22"+self.get_hex_from_int(self.same_line_irq(i)))
-        return "".join(irq_list)
+    def convert_irq_to_int(self, irq):
+        b = "0"*(16-irq)+"1"+"0"*(irq)
+        return int(b,2)
 
     def get_all_irqs(self, irq):
         irq_list = []
@@ -341,7 +359,7 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
             print("")
             patches.append({"Comment":"Rename _CRS to XCRS in HPET","Find":current_crs+pad,"Replace":current_xcrs+pad})
 
-            print("Checking IRQs...")
+            print("Checking IRQs ({})...".format(",".join([str(x) for x in self.target_irqs]) if len(self.target_irqs) else "All"))
             print("")
             # Now we verify our IRQ checks
             devs = self.list_irqs(dsdt_contents)
@@ -353,41 +371,32 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                         con_str = ",".join([str(y) for y in has_conflict])
                         print("!!! Non-Legacy {} IRQs conflict with HPET patch: {} !!!".format(dev,con_str))
                     continue
-                i = self.get_hex_from_irqs(devs[dev])
-                irq_patch_list = []
+                irq_patches = self.get_hex_from_irqs(devs[dev],self.target_irqs)
+                i = [x for x in irq_patches if x["changed"]]
                 for a,t in enumerate(i):
+                    if not t["changed"]:
+                        # Nothing patched - skip
+                        continue
                     # Try our endings here - 7900, 8609, and 4701
                     ending = None
                     for x in ["7900","8609","4701"]:
-                        t_bytes = binascii.unhexlify(t+x)
+                        t_bytes = binascii.unhexlify(t["find"]+x)
                         if t_bytes in dsdt_raw:
                             ending = x
                             break
                     if not ending:
-                        print("Missing IRQ Null Patch ending for {}! Skipping...".format(dev))
+                        print("Missing IRQ Patch ending for {}! Skipping...".format(dev))
                         continue
-                    if len(t) % 6:
-                        print("IRQ Null Patch for {} has an incorrect length! Skipping...".format(dev))
-                        continue
-                    t_patch = t+ending
-                    r_patch = int(len(t)/6)*"220000"+ending
-                    found_irq = devs[dev]
+                    t_patch = t["find"]+ending
+                    r_patch = t["repl"]+ending
+                    name = "{} IRQ {} Patch".format(dev, t["irq"])
                     if len(i) > 1:
-                        found_irq = devs[dev].split("-")[a]
-                    name = "{} IRQ {} Null Patch".format(dev, found_irq)
-                    irq_patch_list.append({"Comment":name,"Find":t_patch,"Replace":r_patch})
-                # Walk the patches we have - remove any that don't actually patch, then print them
-                irq_patch_list = [x for x in irq_patch_list if x["Find"] != x["Replace"]]
-                # If the list has more than one item - number them too
-                for a,t in enumerate(irq_patch_list):
-                    if len(irq_patch_list) > 1:
-                        t["Comment"] = t["Comment"]+" Patch {} of {}".format(a+1,len(irq_patch_list))
-                    print(" - {}".format(t["Comment"]))
-                    print("      Find: {}".format(t["Find"]))
-                    print("   Replace: {}".format(t["Replace"]))
+                        name += "Patch {} of {}".format(a+1, len(i))
+                    patches.append({"Comment":name,"Find":t_patch,"Replace":r_patch})
+                    print(" - {}".format(name))
+                    print("      Find: {}".format(t_patch))
+                    print("   Replace: {}".format(r_patch))
                     print("")
-                    patches.append(t)
-                
 
             if "PCI0.LPCB" in dsdt_c:
                 self.scope = "LPCB"
