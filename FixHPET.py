@@ -88,7 +88,8 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
         current_device = None
         irq = False
         last_irq = False
-        for line in dsdt:
+        irq_index = 0
+        for index,line in enumerate(dsdt):
             if ":" in line.split("//")[0]:
                 # Skip all hex lines
                 continue
@@ -100,9 +101,11 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                     if last_irq: # In a row
                         devices[current_device] += ":"+num
                     else: # Skipped at least one line
-                        devices[current_device] += "-"+num
+                        irq_index = self.find_next_hex(dsdt, index)[1]
+                        devices[current_device] += "-"+str(irq_index)+"|"+num
                 else:
-                    devices[current_device] = line.split("{")[1].split("}")[0]
+                    irq_index = self.find_next_hex(dsdt, index)[1]
+                    devices[current_device] = str(irq_index)+"|"+line.split("{")[1].split("}")[0]
                 irq = False
                 last_irq = True
             elif "Device (" in line:
@@ -130,7 +133,9 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
         # 
         # Can end with 79 [00] (end of method), 86 09 (middle of method) or 47 01 (unknown)
         lines = []
-        for i in irq.split("-"):
+        for a in irq.split("-"):
+            index,i = a.split("|") # Get the index
+            index = int(index)
             find = self.get_int_for_line(i)
             repl = [0]*len(find)
             # Now we need to verify if we're patching *all* IRQs, or just some specifics
@@ -145,7 +150,8 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
             d = {
                 "irq":i,
                 "find": "".join(["22"+self.get_hex_from_int(x) for x in find]),
-                "repl": "".join(["22"+self.get_hex_from_int(x) for x in repl])
+                "repl": "".join(["22"+self.get_hex_from_int(x) for x in repl]),
+                "index": index
                 }
             d["changed"] = not (d["find"]==d["repl"])
             lines.append(d)
@@ -171,12 +177,13 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
         return total
 
     def convert_irq_to_int(self, irq):
-        b = "0"*(15-irq)+"1"+"0"*(irq)
+        b = "0"*(16-irq)+"1"+"0"*(irq)
         return int(b,2)
 
     def get_all_irqs(self, irq):
         irq_list = []
-        for i in irq.split("-"):
+        for a in irq.split("-"):
+            i = a.split("|")[1]
             for x in i.split(":"):
                 for y in x.split(","):
                     if y == "#":
@@ -191,15 +198,37 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
     def get_hex_bytes(self, line):
         return binascii.unhexlify(line)
     
-    def find_next_hex(self, dsdt, index):
+    def find_next_hex(self, dsdt, index=0):
         # Returns the index of the next set of hex digits after the passed index
+        start_index = -1
+        end_index   = -1
+        old_hex = True
         for i,line in enumerate(dsdt[index:]):
-            if i == 0:
-                # Skip the current index
+            if old_hex:
+                if not self.is_hex(line):
+                    # Broke out of the old hex
+                    old_hex = False
                 continue
-            if ":" in line.split("//")[0]: # Checks for a :, but not in comments
-                return index+i
-        return -1 # Not found
+            # Not old_hex territory - check if we got new hex
+            if self.is_hex(line): # Checks for a :, but not in comments
+                start_index = i+index
+                hex_text,end_index = self.get_hex_starting_at(dsdt, start_index)
+                return (hex_text, start_index, end_index)
+        return ("",start_index,end_index)
+
+    def is_hex(self, line):
+        return ":" in line.split("//")[0]
+
+    def get_hex_starting_at(self, dsdt, start_index):
+        # Returns a tuple of the hex, and the ending index
+        hex_text = ""
+        index = -1
+        for i,x in enumerate(dsdt[start_index:]):
+            if not self.is_hex(x):
+                break
+            hex_text += self.get_hex(x)
+            index = i+start_index
+        return (hex_text, index)
 
     def find_hpet_crs(self, dsdt):
         found_hpet = False
@@ -220,7 +249,7 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                 continue
             if "Method (_CRS" in line:
                 # Found the _CRS - let's go until we hit the hex
-                return self.find_next_hex(dsdt,i)
+                return self.find_next_hex(dsdt,i)[1]
         return -1
 
     def get_data(self, data):
@@ -253,6 +282,84 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
             "TableLength": 0,
             "TableSignature": zero
         }
+
+    def get_unique_pad(self, current_hex, dsdt_contents, dsdt_raw, index):
+        # Returns any pad needed to make the passed patch unique
+        line,last_index  = self.get_hex_starting_at(dsdt_contents,index)
+        pad = ""
+        line  = current_hex.join(line.split(current_hex)[1:])
+        while True:
+            # Check if our hex string is unique
+            check_bytes = self.get_hex_bytes(current_hex+pad)
+            if dsdt_raw.count(check_bytes) > 1:
+                # More than one instance - add more pad
+                if not len(line):
+                    # Need to grab more 
+                    line, start_index, last_index = self.find_next_hex(dsdt_contents,last_index)
+                    if last_index == -1:
+                        raise Exception("Hit end of file before unique hex was found!")
+                pad += line[0:2]
+                line = line[2:]
+                continue
+            break
+        return pad
+
+    def get_irq_choice(self, irqs):
+        while True:
+            pad = 19
+            self.u.head("Select IRQs To Nullify")
+            print("")
+            print("Current Legacy IRQs:")
+            print("")
+            if not len(irqs):
+                print(" - None Found")
+            pad+=len(irqs) if len(irqs) else 1
+            for x in irqs:
+                print(" - {}: {}".format(x.rjust(4," "),self.get_all_irqs(irqs[x])))
+            print("")
+            print("C. Only Conflicitng IRQs from Legacy Devices ({} from IPIC/TMR/RTC)".format(",".join([str(x) for x in self.target_irqs]) if len(self.target_irqs) else "None"))
+            print("O. Only Conflicting IRQs ({})".format(",".join([str(x) for x in self.target_irqs]) if len(self.target_irqs) else "None"))
+            print("L. Legacy IRQs (from IPIC, TMR/TIMR, and RTC)")
+            print("")
+            print("You can also type your own list of Devices and IRQs.")
+            print("The format is DEV1:IRQ1,IRQ2 DEV2:IRQ3,IRQ4")
+            print("You can omit the IRQ# to remove all from that devic (DEV1: DEV2:1,2,3)")
+            print("For example, to remove IRQ 0 from RTC, all from IPIC, and 8 and 11 from TMR:\n")
+            print("RTC:0 IPIC: TMR:8,11")
+            if pad < 24:
+                pad = 24
+            self.u.resize(80, pad)
+            menu = self.u.grab("Please select an option (default is C):  ")
+            if not len(menu):
+                menu = "c"
+            d = {}
+            if menu.lower() == "o":
+                for x in irqs:
+                    d[x] = self.target_irqs
+            elif menu.lower() == "l":
+                for x in ["IPIC","TMR","TIMR","RTC"]:
+                    d[x] = []
+            elif menu.lower() == "c":
+                for x in ["IPIC","TMR","TIMR","RTC"]:
+                    d[x] = self.target_irqs
+            else:
+                # User supplied
+                for i in menu.split(" "):
+                    if not len(i):
+                        continue
+                    try:
+                        name,val = i.split(":")
+                        val = [int(x) for x in val.split(",") if len(x)]
+                    except Exception as e:
+                        # Incorrectly formatted
+                        print("!! Incorrect Custom IRQ List Format !!\n - {}".format(e))
+                        d = None
+                        break
+                    d[name.upper()] = val
+                if d == None:
+                    continue
+            self.u.resize(80,24)
+            return d
 
     def main(self):
         cwd = os.getcwd()
@@ -327,51 +434,32 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
             if hpet_crs == -1:
                 raise Exception("Could not locate HPET _CRS!")
             print(" - Found HPET _CRS at index {}".format(hpet_crs))
-            
-            # Save the initial find/replace
-            current_crs  = self.get_hex(dsdt_contents[hpet_crs])
-            current_xcrs = current_crs.replace(self._crs,self.xcrs)
 
             print("")
             print("Loading {} and verifying hex data is unique...".format(os.path.basename(dsdt_path)))
             with open(dsdt_path,"rb") as f:
                 dsdt_raw = f.read()
-            last_index = hpet_crs
-            pad = ""
-            patches = []
-            while True:
-                # Check if our hex string is unique
-                check_bytes = self.get_hex_bytes(current_crs+pad)
-                if dsdt_raw.count(check_bytes) > 2:
-                    # More than one instance - add more pad
-                    last_index = self.find_next_hex(dsdt_contents,last_index)
-                    if last_index == -1:
-                        raise Exception("Hit end of file before unique hex was found!")
-                    # Got more hex to pad with
-                    pad += self.get_hex(dsdt_contents[last_index])
-                    continue
-                break
-            
-            print("")
-            print(" - _CRS to XCRS Rename:")
-            print("      Find: {}".format(current_crs+pad))
-            print("   Replace: {}".format(current_xcrs+pad))
-            print("")
-            patches.append({"Comment":"Rename _CRS to XCRS in HPET","Find":current_crs+pad,"Replace":current_xcrs+pad})
 
-            print("Checking IRQs ({})...".format(",".join([str(x) for x in self.target_irqs]) if len(self.target_irqs) else "All"))
-            print("")
+            pad = self.get_unique_pad(self._crs, dsdt_contents, dsdt_raw, hpet_crs)
+            patches = [{"Comment":"HPET _CRS to XCRS Rename","Find":self._crs+pad,"Replace":self.xcrs+pad}]
+
             # Now we verify our IRQ checks
             devs = self.list_irqs(dsdt_contents)
+            target_irqs = self.get_irq_choice(devs)
+
+            self.u.head("Creating IRQ Patches")
+            print("")
+            print(" - HPET _CRS to XCRS Rename:")
+            print("      Find: {}".format(self._crs+pad))
+            print("   Replace: {}".format(self.xcrs+pad))
+            print("")
+            print("Checking IRQs...")
+            print("")
+
             for dev in devs:
-                irq_list = self.get_all_irqs(devs[dev])
-                has_conflict = [x for x in irq_list if x in [0,8,11]]
-                if not dev in self.legacy_irq:
-                    if len(has_conflict):
-                        con_str = ",".join([str(y) for y in has_conflict])
-                        print("!!! Non-Legacy {} IRQs conflict with HPET patch: {} !!!".format(dev,con_str))
+                if not dev in target_irqs:
                     continue
-                irq_patches = self.get_hex_from_irqs(devs[dev],self.target_irqs)
+                irq_patches = self.get_hex_from_irqs(devs[dev],target_irqs[dev])
                 i = [x for x in irq_patches if x["changed"]]
                 for a,t in enumerate(i):
                     if not t["changed"]:
@@ -387,8 +475,9 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                     if not ending:
                         print("Missing IRQ Patch ending for {}! Skipping...".format(dev))
                         continue
-                    t_patch = t["find"]+ending
-                    r_patch = t["repl"]+ending
+                    pad = self.get_unique_pad(t["find"]+ending, dsdt_contents, dsdt_raw, t["index"])
+                    t_patch = t["find"]+ending+pad
+                    r_patch = t["repl"]+ending+pad
                     name = "{} IRQ {} Patch".format(dev, t["irq"])
                     if len(i) > 1:
                         name += "Patch {} of {}".format(a+1, len(i))
@@ -449,7 +538,7 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
 
             print("")
             print("Done.")
-            self.re.reveal(os.path.join(o_folder,"patches_Clover.plist"))
+            self.re.reveal(os.path.join(o_folder,"patches_Clover.plist"),True)
         except Exception as e:
             print("An error occurred :(\n - {}".format(e))
             pass
