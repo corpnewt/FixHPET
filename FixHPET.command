@@ -119,6 +119,41 @@ print_target_missing() {
     exit 1
 }
 
+vercomp () {
+    # From: https://stackoverflow.com/a/4025065
+    if [[ $1 == $2 ]]
+    then
+        echo "0"
+        return
+    fi
+    local IFS=.
+    local i ver1=($1) ver2=($2)
+    # fill empty fields in ver1 with zeros
+    for ((i=${#ver1[@]}; i<${#ver2[@]}; i++))
+    do
+        ver1[i]=0
+    done
+    for ((i=0; i<${#ver1[@]}; i++))
+    do
+        if [[ -z ${ver2[i]} ]]
+        then
+            # fill empty fields in ver2 with zeros
+            ver2[i]=0
+        fi
+        if ((10#${ver1[i]} > 10#${ver2[i]}))
+        then
+            echo "1"
+            return
+        fi
+        if ((10#${ver1[i]} < 10#${ver2[i]}))
+        then
+            echo "2"
+            return
+        fi
+    done
+    return 0
+}
+
 get_local_python_version() {
     # $1 = Python bin name (defaults to python3)
     # Echoes the path to the highest version of the passed python bin if any
@@ -147,7 +182,7 @@ get_local_python_version() {
             continue
         fi
         # Got the py version - compare to our max
-        if [ "$max_version" == "" ] || [ "$(echo $python_version > $max_version |bc)" == "1" ]; then
+        if [ "$max_version" == "" ] || [ "$(vercomp "$python_version" "$max_version")" == "1" ]; then
             # Max not set, or less than the current - update it
             max_version="$python_version"
             python_path="$python"
