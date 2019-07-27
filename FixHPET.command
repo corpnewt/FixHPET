@@ -252,6 +252,10 @@ main() {
     if [ "$use_py3" != "FORCE" ] && [ "$python" == "" ]; then
         # We aren't using py3 explicitly, and we don't already have a path
         python="$(get_local_python_version python2)"
+        if [ "$python" == "" ]; then
+            # Try just looking for "python"
+            python="$(get_local_python_version python)"
+        fi
         version="$($python -V 2>&1 | cut -d' ' -f2 | grep -E "[\d.]+")"
     fi
     if [ "$python" == "" ]; then
