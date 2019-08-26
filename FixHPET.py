@@ -105,7 +105,7 @@ DefinitionBlock ("", "SSDT", 2, "hack", "HPET", 0x00000000)
                         devices[current_device] += "-"+str(irq_index)+"|"+num
                 else:
                     irq_index = self.find_next_hex(dsdt, index)[1]
-                    devices[current_device] = str(irq_index)+"|"+line.split("{")[1].split("}")[0]
+                    devices[current_device] = str(irq_index)+"|"+num
                 irq = False
                 last_irq = True
             elif "Device (" in line:
